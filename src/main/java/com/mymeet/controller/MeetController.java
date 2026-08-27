@@ -1,76 +1,33 @@
 package com.mymeet.controller;
 
-import com.mymeet.dto.ChatMessageRequest;
 import com.mymeet.dto.JoinRequest;
 import com.mymeet.dto.LeaveRequest;
 import com.mymeet.dto.WebSocketEvent;
-import com.mymeet.model.Participant;
-import com.mymeet.model.ParticipantSession;
 import com.mymeet.room.RoomManager;
-import org.springframework.context.event.EventListener;
+
 import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
-import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
 import org.springframework.stereotype.Controller;
-import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
+import java.util.Map;
 
-/*
- * MeetController is the STOMP message entry point for MyMeet.
- *
- * Frontend sends messages to /app destinations.
- *
- * Example:
- *
- * Frontend
- *     |
- *     | SEND /app/meet/join
- *     v
- * MeetController
- *     |
- *     v
- * RoomManager
- *     |
- *     v
- * SimpMessagingTemplate
- *     |
- *     | SEND /topic/meet/{roomId}
- *     v
- * All participants subscribed to that room
- *
- * The controller mainly handles:
- *
- * - Validating incoming WebSocket messages
- * - Identifying the WebSocket session
- * - Delegating room operations to RoomManager
- * - Broadcasting events to the room
- * - Routing WebRTC signaling messages
- * - Cleaning up participants when a WebSocket disconnects
- *
- * The controller does NOT contain the actual room-management
- * data structure or WebRTC negotiation logic.
- */
 @Controller
 public class MeetController {
 
     private final SimpMessagingTemplate messagingTemplate;
+
     private final RoomManager roomManager;
 
-    /*
-     * SimpMessagingTemplate is Spring's mechanism for sending
-     * STOMP messages from the backend to subscribed clients.
-     *
-     * RoomManager owns the in-memory meeting state.
-     *
-     * Keeping these responsibilities separate makes the controller
-     * responsible mainly for message handling and routing.
-     */
+
     public MeetController(
             SimpMessagingTemplate messagingTemplate,
             RoomManager roomManager
     ) {
+
         this.messagingTemplate = messagingTemplate;
+
         this.roomManager = roomManager;
     }
 
@@ -79,214 +36,200 @@ public class MeetController {
        JOIN
        ========================================================= */
 
-    /*
-     * Handles:
-     *
-     *     SEND /app/meet/join
-     *
-     * The frontend sends the participant's:
-     *
-     * - roomId
-     * - participantId
-     * - name
-     *
-     * The WebSocket session ID is obtained from the STOMP
-     * connection instead of trusting the frontend to provide it.
-     */
     @MessageMapping("/meet/join")
     public void join(
-            JoinRequest request,
-            SimpMessageHeaderAccessor accessor
+            @Payload JoinRequest request,
+            SimpMessageHeaderAccessor headerAccessor
     ) {
 
-        /*
-         * Every WebSocket connection has a unique session ID.
-         *
-         * This session ID is important because the backend uses it
-         * to associate a WebSocket connection with a participant.
-         *
-         * We should not trust the frontend to tell us which session
-         * it belongs to.
-         */
-        String sessionId = accessor.getSessionId();
+        String sessionId =
+                headerAccessor.getSessionId();
 
-        if (sessionId == null) {
-            return;
-        }
+
+        System.out.println(
+                "[MyMeet] JOIN REQUEST:"
+                        + " session=" + sessionId
+                        + ", room=" + request.getRoomId()
+                        + ", participant=" + request.getParticipantId()
+                        + ", name=" + request.getName()
+        );
+
 
         /*
-         * Validate the incoming request before interacting with
-         * the room manager.
-         *
-         * Invalid room IDs or participant IDs should never be allowed
-         * to enter the room-management layer.
+         * A STOMP session is mandatory because RoomManager
+         * now uses the WebSocket session as the authoritative
+         * connection identity.
          */
-        if (
-                request == null ||
-                        request.getRoomId() == null ||
-                        request.getRoomId().isBlank() ||
-                        request.getParticipantId() == null ||
-                        request.getParticipantId().isBlank()
-        ) {
-            return;
-        }
+        if (sessionId == null || sessionId.isBlank()) {
 
-        /*
-         * Normalize user-provided values before using them.
-         *
-         * This prevents accidental whitespace from creating different
-         * room IDs or participant IDs.
-         */
-        String roomId =
-                request.getRoomId().trim();
-
-        String participantId =
-                request.getParticipantId().trim();
-
-        /*
-         * Name is not required for joining the room.
-         *
-         * If the frontend does not provide a valid name,
-         * MyMeet treats the participant as "Guest".
-         */
-        String name =
-                request.getName() == null ||
-                        request.getName().isBlank()
-                        ? "Guest"
-                        : request.getName().trim();
-
-
-        /* -----------------------------------------------------
-           JOIN ROOM
-           ----------------------------------------------------- */
-
-        /*
-         * Delegate the actual room operation to RoomManager.
-         *
-         * RoomManager is responsible for:
-         *
-         * - Creating the room if necessary
-         * - Adding the participant
-         * - Detecting duplicate participants
-         * - Detecting duplicate joins from the same session
-         *
-         * The controller should not duplicate that state-management
-         * logic.
-         */
-        RoomManager.JoinResult result =
-                roomManager.join(
-                        sessionId,
-                        roomId,
-                        participantId,
-                        name
-                );
-
-
-        /* -----------------------------------------------------
-           DUPLICATE PARTICIPANT
-           ----------------------------------------------------- */
-
-        /*
-         * A participantId represents the logical participant.
-         *
-         * If the same participant is already participating,
-         * the backend rejects the new join instead of creating
-         * an inconsistent room state.
-         */
-        if (result.duplicateParticipant()) {
-
-            messagingTemplate.convertAndSend(
-                    destination(roomId),
-                    WebSocketEvent.joinRejected(
-                            roomId,
-                            participantId,
-                            "You are already participating in this meeting."
-                    )
+            System.err.println(
+                    "[MyMeet] JOIN FAILED: "
+                            + "WebSocket session ID is missing"
             );
 
             return;
         }
 
 
-        /* -----------------------------------------------------
-           DUPLICATE JOIN FROM SAME SESSION
-           ----------------------------------------------------- */
+        try {
 
-        /*
-         * A client can accidentally send JOIN more than once.
-         *
-         * If the participant is already registered for this
-         * WebSocket session, RoomManager reports newlyJoined() = false.
-         *
-         * No second ROOM_STATE or PARTICIPANT_JOINED event should
-         * be generated for the same join operation.
-         */
-        if (!result.newlyJoined()) {
-            return;
+            /*
+             * =====================================================
+             * JOIN ROOM
+             * =====================================================
+             *
+             * Current RoomManager signature:
+             *
+             * join(
+             *     sessionId,
+             *     roomId,
+             *     participantId,
+             *     name
+             * )
+             */
+
+            RoomManager.JoinResult result =
+                    roomManager.join(
+                            sessionId,
+                            request.getRoomId(),
+                            request.getParticipantId(),
+                            request.getName()
+                    );
+
+
+            /*
+             * =====================================================
+             * INVALID SESSION
+             * =====================================================
+             */
+
+            if (result.invalidSession()) {
+
+                System.err.println(
+                        "[MyMeet] JOIN REJECTED:"
+                                + " invalid session"
+                                + ", session=" + sessionId
+                                + ", room=" + request.getRoomId()
+                );
+
+                messagingTemplate.convertAndSend(
+                        "/topic/meet/" + request.getRoomId(),
+                        WebSocketEvent.joinRejected(
+                                request.getRoomId(),
+                                request.getParticipantId(),
+                                "Invalid WebSocket session"
+                        )
+                );
+
+                return;
+            }
+
+
+            /*
+             * =====================================================
+             * DUPLICATE PARTICIPANT
+             * =====================================================
+             */
+
+            if (result.duplicateParticipant()) {
+
+                System.err.println(
+                        "[MyMeet] JOIN REJECTED:"
+                                + " participant already connected"
+                                + ", participant="
+                                + request.getParticipantId()
+                );
+
+                messagingTemplate.convertAndSend(
+                        "/topic/meet/" + request.getRoomId(),
+                        WebSocketEvent.joinRejected(
+                                request.getRoomId(),
+                                request.getParticipantId(),
+                                "Participant is already connected"
+                        )
+                );
+
+                return;
+            }
+
+
+            /*
+             * =====================================================
+             * ROOM STATE
+             * =====================================================
+             *
+             * This is sent for both:
+             *
+             * 1. newly joined participant
+             * 2. repeated JOIN from the same session
+             *
+             * The frontend can use ROOM_STATE to initialize
+             * the meeting participant list.
+             */
+
+            messagingTemplate.convertAndSend(
+                    "/topic/meet/" + request.getRoomId(),
+                    WebSocketEvent.roomState(
+                            request.getRoomId(),
+                            result.participants()
+                    )
+            );
+
+
+            /*
+             * =====================================================
+             * PARTICIPANT JOINED
+             * =====================================================
+             *
+             * Only broadcast this event when a participant
+             * was actually added.
+             *
+             * If the same session sends JOIN again, RoomManager
+             * returns newlyJoined=false.
+             */
+
+            if (result.newlyJoined()) {
+
+                messagingTemplate.convertAndSend(
+                        "/topic/meet/" + request.getRoomId(),
+                        WebSocketEvent.participantJoined(
+                                request.getRoomId(),
+                                request.getParticipantId(),
+                                request.getName()
+                        )
+                );
+            }
+
+
+            System.out.println(
+                    "[MyMeet] JOIN SUCCESS:"
+                            + " session=" + sessionId
+                            + ", room=" + request.getRoomId()
+                            + ", participant="
+                            + request.getParticipantId()
+                            + ", participants="
+                            + result.participants().size()
+            );
+
+        } catch (Exception exception) {
+
+            System.err.println(
+                    "[MyMeet] JOIN FAILED: "
+                            + exception.getMessage()
+            );
+
+            exception.printStackTrace();
+
+
+            messagingTemplate.convertAndSend(
+                    "/topic/meet/" + request.getRoomId(),
+                    WebSocketEvent.joinRejected(
+                            request.getRoomId(),
+                            request.getParticipantId(),
+                            exception.getMessage()
+                    )
+            );
         }
-
-
-        /* =====================================================
-           ROOM STATE
-           ===================================================== */
-
-        /*
-         * ROOM_STATE represents the current state of the room.
-         *
-         * It contains the participants currently known to the
-         * backend and is broadcast to everyone subscribed to:
-         *
-         *     /topic/meet/{roomId}
-         *
-         * The frontend uses this information to synchronize its
-         * participant list.
-         *
-         * Important architectural point:
-         *
-         * ROOM_STATE is a room synchronization event.
-         *
-         * It is NOT itself a WebRTC negotiation event.
-         *
-         * Because ROOM_STATE is broadcast to everyone, the frontend
-         * must NOT start unlimited WebRTC negotiation every time
-         * ROOM_STATE is received.
-         *
-         * WebRTC negotiation should happen only once per
-         * participant pair, according to the frontend's negotiation
-         * rules.
-         */
-        messagingTemplate.convertAndSend(
-                destination(roomId),
-                WebSocketEvent.roomState(
-                        roomId,
-                        result.participants()
-                )
-        );
-
-
-        /* =====================================================
-           PARTICIPANT JOINED
-           ===================================================== */
-
-        /*
-         * PARTICIPANT_JOINED is a separate event from ROOM_STATE.
-         *
-         * ROOM_STATE tells clients the current complete room state.
-         *
-         * PARTICIPANT_JOINED tells clients that a specific participant
-         * has just joined.
-         *
-         * Keeping these events separate allows the frontend to
-         * distinguish between synchronization and a new join event.
-         */
-        messagingTemplate.convertAndSend(
-                destination(roomId),
-                WebSocketEvent.participantJoined(
-                        roomId,
-                        participantId,
-                        name
-                )
-        );
     }
 
 
@@ -294,201 +237,278 @@ public class MeetController {
        LEAVE
        ========================================================= */
 
-    /*
-     * Handles:
-     *
-     *     SEND /app/meet/leave
-     *
-     * A participant can explicitly leave the meeting by sending
-     * this message.
-     *
-     * There is also a second cleanup mechanism:
-     *
-     *     SessionDisconnectEvent
-     *
-     * That handles cases where the browser closes, the network
-     * connection disappears, or the WebSocket disconnects without
-     * the frontend successfully sending LEAVE.
-     */
     @MessageMapping("/meet/leave")
     public void leave(
-            LeaveRequest request,
-            SimpMessageHeaderAccessor accessor
+            @Payload LeaveRequest request,
+            SimpMessageHeaderAccessor headerAccessor
     ) {
 
-        /*
-         * Identify the actual WebSocket connection making the request.
-         */
         String sessionId =
-                accessor.getSessionId();
+                headerAccessor.getSessionId();
 
-        if (sessionId == null || request == null) {
+
+        System.out.println(
+                "[MyMeet] LEAVE REQUEST:"
+                        + " session=" + sessionId
+                        + ", room=" + request.getRoomId()
+                        + ", participant="
+                        + request.getParticipantId()
+        );
+
+
+        if (sessionId == null || sessionId.isBlank()) {
+
+            System.err.println(
+                    "[MyMeet] LEAVE FAILED: "
+                            + "WebSocket session ID is missing"
+            );
+
             return;
         }
 
 
-        /*
-         * Retrieve the participant associated with this WebSocket
-         * session.
-         *
-         * This allows the backend to verify that the session actually
-         * belongs to the participant it is trying to remove.
-         */
-        ParticipantSession session =
-                roomManager.getSession(sessionId);
+        try {
 
-        if (session == null) {
-            return;
-        }
+            /*
+             * =====================================================
+             * LEAVE ROOM
+             * =====================================================
+             *
+             * Current RoomManager signature:
+             *
+             * leave(
+             *     sessionId,
+             *     roomId,
+             *     participantId
+             * )
+             */
 
-
-        String requestedRoomId =
-                request.getRoomId();
-
-        String requestedParticipantId =
-                request.getParticipantId();
-
-
-        /*
-         * Validate the room and participant information before
-         * attempting to remove anything.
-         */
-        if (
-                requestedRoomId == null ||
-                        requestedRoomId.isBlank() ||
-                        requestedParticipantId == null ||
-                        requestedParticipantId.isBlank()
-        ) {
-            return;
-        }
+            var removed =
+                    roomManager.leave(
+                            sessionId,
+                            request.getRoomId(),
+                            request.getParticipantId()
+                    );
 
 
-        requestedRoomId =
-                requestedRoomId.trim();
+            /*
+             * If null is returned, the participant was not
+             * successfully removed.
+             */
 
-        requestedParticipantId =
-                requestedParticipantId.trim();
+            if (removed == null) {
 
-
-        /*
-         * Security / consistency check:
-         *
-         * The WebSocket session can only leave its OWN participant.
-         *
-         * We do not allow a client to provide another participant's
-         * participantId and remove that participant from the room.
-         *
-         * The identity relationship is:
-         *
-         *     WebSocket Session
-         *             |
-         *             v
-         *     ParticipantSession
-         *             |
-         *             +---- roomId
-         *             |
-         *             +---- participantId
-         *
-         * Both values must match the leave request.
-         */
-        if (
-                !session.getRoomId().equals(requestedRoomId) ||
-                        !session.getParticipantId().equals(requestedParticipantId)
-        ) {
-            return;
-        }
-
-
-        /*
-         * Remove the participant from RoomManager.
-         *
-         * RoomManager also handles the associated session/room
-         * bookkeeping.
-         */
-        ParticipantSession removed =
-                roomManager.leave(
-                        sessionId,
-                        requestedRoomId,
-                        requestedParticipantId
+                System.err.println(
+                        "[MyMeet] LEAVE REJECTED:"
+                                + " participant/session mismatch"
                 );
 
-        if (removed == null) {
-            return;
+                return;
+            }
+
+
+            /*
+             * =====================================================
+             * NOTIFY OTHER PARTICIPANTS
+             * =====================================================
+             */
+
+            messagingTemplate.convertAndSend(
+                    "/topic/meet/" + request.getRoomId(),
+                    WebSocketEvent.participantLeft(
+                            request.getRoomId(),
+                            request.getParticipantId()
+                    )
+            );
+
+
+            System.out.println(
+                    "[MyMeet] LEAVE SUCCESS:"
+                            + " session=" + sessionId
+                            + ", room=" + request.getRoomId()
+                            + ", participant="
+                            + request.getParticipantId()
+            );
+
+        } catch (Exception exception) {
+
+            System.err.println(
+                    "[MyMeet] LEAVE FAILED: "
+                            + exception.getMessage()
+            );
+
+            exception.printStackTrace();
         }
-
-
-        /*
-         * Notify the remaining participants that this participant
-         * has left the room.
-         */
-        broadcastParticipantLeft(removed);
     }
 
 
     /* =========================================================
-       CHAT
+       CHAT MESSAGE
        ========================================================= */
 
-    /*
-     * Handles:
-     *
-     *     SEND /app/meet/message
-     *
-     * Chat messages are also transported through the same
-     * WebSocket/STOMP connection used by MyMeet for meeting events.
-     *
-     * The backend validates that the sender actually belongs to
-     * the requested room before broadcasting the message.
-     */
     @MessageMapping("/meet/message")
     public void message(
-            ChatMessageRequest request,
-            SimpMessageHeaderAccessor accessor
+            @Payload Map<String, Object> payload
     ) {
 
-        String sessionId =
-                accessor.getSessionId();
-
-        if (sessionId == null || request == null) {
-            return;
-        }
-
-
         String roomId =
-                request.getRoomId();
+                stringValue(payload, "roomId");
 
         String participantId =
-                request.getParticipantId();
+                stringValue(payload, "participantId");
+
+        String name =
+                stringValue(payload, "name");
+
+        String message =
+                stringValue(payload, "message");
 
 
-        /*
-         * Basic request validation.
-         */
         if (
-                roomId == null ||
-                        roomId.isBlank() ||
-                        participantId == null ||
-                        participantId.isBlank()
+                roomId == null
+                        || participantId == null
+                        || message == null
         ) {
             return;
         }
 
 
-        roomId =
-                roomId.trim();
+        System.out.println(
+                "[MyMeet] MESSAGE:"
+                        + " room=" + roomId
+                        + ", participant=" + participantId
+                        + ", message=" + message
+        );
 
-        participantId =
-                participantId.trim();
+
+        messagingTemplate.convertAndSend(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.chatMessage(
+                        roomId,
+                        participantId,
+                        message,
+                        name
+                )
+        );
+    }
+
+
+    /* =========================================================
+       MEDIA STATUS
+       ========================================================= */
+
+    @MessageMapping("/meet/media-status")
+    public void mediaStatus(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
+    ) {
+
+        String sessionId =
+                headerAccessor.getSessionId();
+
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+
+        if (
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+        ) {
+            return;
+        }
 
 
         /*
-         * Verify that the WebSocket session actually owns
-         * this participant in this room.
-         *
-         * This prevents a client from simply changing the
-         * participantId in the request and pretending to be
-         * another participant.
+         * Make sure the WebSocket session is actually
+         * representing this participant.
          */
+
+        if (
+                !roomManager.isMember(
+                        sessionId,
+                        roomId,
+                        participantId
+                )
+        ) {
+
+            System.err.println(
+                    "[MyMeet] MEDIA STATUS REJECTED:"
+                            + " invalid membership"
+            );
+
+            return;
+        }
+
+
+        boolean muted =
+                booleanValue(
+                        payload,
+                        "muted",
+                        false
+                );
+
+        boolean cameraOff =
+                booleanValue(
+                        payload,
+                        "cameraOff",
+                        false
+                );
+
+
+        System.out.println(
+                "[MyMeet] MEDIA STATUS:"
+                        + " room=" + roomId
+                        + ", participant=" + participantId
+                        + ", muted=" + muted
+                        + ", cameraOff=" + cameraOff
+        );
+
+
+        messagingTemplate.convertAndSend(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.mediaStatus(
+                        roomId,
+                        participantId,
+                        muted,
+                        cameraOff
+                )
+        );
+    }
+
+
+    /* =========================================================
+       HAND RAISE
+       ========================================================= */
+
+    @MessageMapping("/meet/hand-raise")
+    public void handRaise(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
+    ) {
+
+        String sessionId =
+                headerAccessor.getSessionId();
+
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+
+        if (
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+        ) {
+            return;
+        }
+
+
         if (
                 !roomManager.isMember(
                         sessionId,
@@ -500,77 +520,158 @@ public class MeetController {
         }
 
 
-        /*
-         * Retrieve the session after membership has been verified.
-         */
-        ParticipantSession session =
-                roomManager.getSession(sessionId);
-
-        if (session == null) {
-            return;
-        }
+        boolean handRaised =
+                booleanValue(
+                        payload,
+                        "handRaised",
+                        false
+                );
 
 
-        /*
-         * Retrieve the participant associated with the session.
-         *
-         * The backend uses this participant object to obtain trusted
-         * participant information such as the display name.
-         */
-        Participant participant =
-                roomManager.getParticipant(sessionId);
-
-        if (participant == null) {
-            return;
-        }
+        System.out.println(
+                "[MyMeet] HAND RAISE:"
+                        + " room=" + roomId
+                        + ", participant=" + participantId
+                        + ", handRaised=" + handRaised
+        );
 
 
-        /*
-         * Final consistency check.
-         *
-         * Even though membership was already verified, we explicitly
-         * confirm that the session's stored identity matches the
-         * request.
-         */
+        messagingTemplate.convertAndSend(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.handRaise(
+                        roomId,
+                        participantId,
+                        handRaised
+                )
+        );
+    }
+
+
+    /* =========================================================
+       SCREEN SHARE
+       ========================================================= */
+
+    @MessageMapping("/meet/screen-share")
+    public void screenShare(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
+    ) {
+
+        String sessionId =
+                headerAccessor.getSessionId();
+
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+
         if (
-                !session.getRoomId().equals(roomId) ||
-                        !session.getParticipantId().equals(participantId)
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
         ) {
             return;
         }
 
 
-        /*
-         * Normalize the message.
-         *
-         * Empty messages are ignored instead of being broadcast.
-         */
-        String message =
-                request.getMessage() == null
-                        ? ""
-                        : request.getMessage().trim();
-
-        if (message.isEmpty()) {
+        if (
+                !roomManager.isMember(
+                        sessionId,
+                        roomId,
+                        participantId
+                )
+        ) {
             return;
         }
 
 
-        /*
-         * Broadcast the chat event to the room.
-         *
-         * The same room destination is used for chat, participant
-         * events, room state, and WebRTC signaling.
-         *
-         * The frontend determines what action to perform based
-         * on the event type.
-         */
+        boolean screenSharing =
+                booleanValue(
+                        payload,
+                        "screenSharing",
+                        false
+                );
+
+
+        System.out.println(
+                "[MyMeet] SCREEN SHARE:"
+                        + " room=" + roomId
+                        + ", participant=" + participantId
+                        + ", screenSharing=" + screenSharing
+        );
+
+
         messagingTemplate.convertAndSend(
-                destination(roomId),
-                WebSocketEvent.chatMessage(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.screenShare(
                         roomId,
                         participantId,
-                        message,
-                        participant.getName()
+                        screenSharing
+                )
+        );
+    }
+
+
+    /* =========================================================
+       REACTION
+       ========================================================= */
+
+    @MessageMapping("/meet/reaction")
+    public void reaction(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
+    ) {
+
+        String sessionId =
+                headerAccessor.getSessionId();
+
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+        String emoji =
+                stringValue(payload, "emoji");
+
+
+        if (
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+                        || emoji == null
+        ) {
+            return;
+        }
+
+
+        if (
+                !roomManager.isMember(
+                        sessionId,
+                        roomId,
+                        participantId
+                )
+        ) {
+            return;
+        }
+
+
+        System.out.println(
+                "[MyMeet] REACTION:"
+                        + " room=" + roomId
+                        + ", participant=" + participantId
+                        + ", emoji=" + emoji
+        );
+
+
+        messagingTemplate.convertAndSend(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.reaction(
+                        roomId,
+                        participantId,
+                        emoji
                 )
         );
     }
@@ -580,225 +681,42 @@ public class MeetController {
        WEBRTC OFFER
        ========================================================= */
 
-    /*
-     * Handles:
-     *
-     *     SEND /app/webrtc/offer
-     *
-     * The backend does not create the WebRTC offer.
-     *
-     * The browser's RTCPeerConnection creates the offer.
-     *
-     * The backend's responsibility is to validate and route
-     * the signaling message to the intended room.
-     */
     @MessageMapping("/webrtc/offer")
     public void offer(
-            WebSocketEvent request,
-            SimpMessageHeaderAccessor accessor
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
     ) {
 
-        sendWebRtcSignal(
-                request,
-                accessor,
-                WebRtcSignalType.OFFER
-        );
-    }
-
-
-    /* =========================================================
-       WEBRTC ANSWER
-       ========================================================= */
-
-    /*
-     * Handles:
-     *
-     *     SEND /app/webrtc/answer
-     *
-     * The browser creates the answer after receiving an offer.
-     *
-     * The backend only transports the signaling information.
-     */
-    @MessageMapping("/webrtc/answer")
-    public void answer(
-            WebSocketEvent request,
-            SimpMessageHeaderAccessor accessor
-    ) {
-
-        sendWebRtcSignal(
-                request,
-                accessor,
-                WebRtcSignalType.ANSWER
-        );
-    }
-
-
-    /* =========================================================
-       WEBRTC ICE
-       ========================================================= */
-
-    /*
-     * Handles:
-     *
-     *     SEND /app/webrtc/ice
-     *
-     * ICE candidates are generated by the browser's WebRTC
-     * implementation.
-     *
-     * The backend simply validates and routes them.
-     */
-    @MessageMapping("/webrtc/ice")
-    public void ice(
-            WebSocketEvent request,
-            SimpMessageHeaderAccessor accessor
-    ) {
-
-        sendWebRtcSignal(
-                request,
-                accessor,
-                WebRtcSignalType.ICE
-        );
-    }
-
-
-    /* =========================================================
-       WEBRTC SIGNAL TYPES
-       ========================================================= */
-
-    /*
-     * Internal representation of the three signaling messages
-     * supported by MyMeet.
-     *
-     * OFFER:
-     *     Caller proposes a WebRTC connection.
-     *
-     * ANSWER:
-     *     Receiver accepts/responds to the offer.
-     *
-     * ICE:
-     *     Candidates used by WebRTC to discover possible
-     *     network paths between peers.
-     */
-    private enum WebRtcSignalType {
-        OFFER,
-        ANSWER,
-        ICE
-    }
-
-
-    /* =========================================================
-       WEBRTC SIGNAL ROUTING
-       ========================================================= */
-
-    /*
-     * Common routing logic for:
-     *
-     *     OFFER
-     *     ANSWER
-     *     ICE
-     *
-     * Instead of duplicating validation and routing code in
-     * three controller methods, all three delegate here.
-     */
-    private void sendWebRtcSignal(
-            WebSocketEvent request,
-            SimpMessageHeaderAccessor accessor,
-            WebRtcSignalType type
-    ) {
-
-        if (request == null) {
-            return;
-        }
-
-
-        /*
-         * Obtain the trusted WebSocket session identity.
-         */
         String sessionId =
-                accessor.getSessionId();
-
-        if (sessionId == null) {
-            return;
-        }
-
+                headerAccessor.getSessionId();
 
         String roomId =
-                request.roomId();
+                stringValue(payload, "roomId");
 
         String participantId =
-                request.participantId();
+                stringValue(payload, "participantId");
 
         String targetParticipantId =
-                request.targetParticipantId();
+                stringValue(
+                        payload,
+                        "targetParticipantId"
+                );
+
+        Object offer =
+                payload.get("offer");
 
 
-        /* -----------------------------------------------------
-           BASIC VALIDATION
-           ----------------------------------------------------- */
-
-        /*
-         * WebRTC signaling is peer-to-peer logically.
-         *
-         * Therefore every signaling event needs:
-         *
-         *     roomId
-         *     sender participantId
-         *     target participantId
-         *
-         * Without these values the backend cannot safely route
-         * or validate the signal.
-         */
         if (
-                roomId == null ||
-                        roomId.isBlank() ||
-                        participantId == null ||
-                        participantId.isBlank() ||
-                        targetParticipantId == null ||
-                        targetParticipantId.isBlank()
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+                        || targetParticipantId == null
+                        || offer == null
         ) {
             return;
         }
 
 
-        roomId =
-                roomId.trim();
-
-        participantId =
-                participantId.trim();
-
-        targetParticipantId =
-                targetParticipantId.trim();
-
-
-        /* -----------------------------------------------------
-           PREVENT SELF SIGNALING
-           ----------------------------------------------------- */
-
-        /*
-         * A participant should never send an offer, answer, or ICE
-         * candidate to itself.
-         *
-         * This also protects against incorrect frontend signaling
-         * logic.
-         */
-        if (
-                participantId.equals(targetParticipantId)
-        ) {
-            return;
-        }
-
-
-        /* -----------------------------------------------------
-           VERIFY SENDER MEMBERSHIP
-           ----------------------------------------------------- */
-
-        /*
-         * Before routing a WebRTC signal, verify that the sender
-         * actually belongs to the requested room.
-         *
-         * The client cannot simply provide an arbitrary roomId and
-         * participantId and start injecting signaling messages.
-         */
         if (
                 !roomManager.isMember(
                         sessionId,
@@ -810,318 +728,219 @@ public class MeetController {
         }
 
 
-        /*
-         * Retrieve the server-side session associated with the
-         * WebSocket connection.
-         */
-        ParticipantSession sender =
-                roomManager.getSession(sessionId);
-
-        if (sender == null) {
-            return;
-        }
+        System.out.println(
+                "[MyMeet] WEBRTC OFFER:"
+                        + " from=" + participantId
+                        + " to=" + targetParticipantId
+        );
 
 
-        /* -----------------------------------------------------
-           VERIFY SESSION IDENTITY
-           ----------------------------------------------------- */
-
-        /*
-         * Verify that the request identity matches the identity
-         * stored against the actual WebSocket session.
-         *
-         * This is another important trust boundary:
-         *
-         *     Client-provided participantId
-         *                 vs
-         *     Server-known session identity
-         *
-         * The server should trust its own session mapping.
-         */
-        if (
-                !sender.getRoomId().equals(roomId) ||
-                        !sender.getParticipantId().equals(participantId)
-        ) {
-            return;
-        }
-
-
-        /* -----------------------------------------------------
-           VERIFY TARGET
-           ----------------------------------------------------- */
-
-        /*
-         * The target participant must currently exist in the
-         * requested room.
-         *
-         * Otherwise there is nobody valid to whom this signal
-         * should be addressed.
-         */
-        if (
-                !roomManager.isParticipantInRoom(
-                        roomId,
-                        targetParticipantId
-                )
-        ) {
-            return;
-        }
-
-
-        WebSocketEvent event;
-
-
-        /* =====================================================
-           OFFER
-           ===================================================== */
-
-        /*
-         * The frontend creates the SDP offer.
-         *
-         * The backend does not inspect or generate the WebRTC
-         * negotiation itself. It only validates and transports it.
-         */
-        if (type == WebRtcSignalType.OFFER) {
-
-            if (request.offer() == null) {
-                return;
-            }
-
-            event =
-                    WebSocketEvent.offer(
-                            roomId,
-                            participantId,
-                            targetParticipantId,
-                            request.offer()
-                    );
-        }
-
-
-        /* =====================================================
-           ANSWER
-           ===================================================== */
-
-        /*
-         * The receiver's browser creates the SDP answer.
-         *
-         * Again, the backend acts only as a signaling transport.
-         */
-        else if (type == WebRtcSignalType.ANSWER) {
-
-            if (request.answer() == null) {
-                return;
-            }
-
-            event =
-                    WebSocketEvent.answer(
-                            roomId,
-                            participantId,
-                            targetParticipantId,
-                            request.answer()
-                    );
-        }
-
-
-        /* =====================================================
-           ICE
-           ===================================================== */
-
-        /*
-         * ICE candidates are generated asynchronously by the
-         * browser while WebRTC attempts to discover usable
-         * network paths.
-         */
-        else {
-
-            if (request.candidate() == null) {
-                return;
-            }
-
-            event =
-                    WebSocketEvent.ice(
-                            roomId,
-                            participantId,
-                            targetParticipantId,
-                            request.candidate()
-                    );
-        }
-
-
-        /* =====================================================
-           BROADCAST SIGNAL
-           ===================================================== */
-
-        /*
-         * MyMeet currently broadcasts the signaling event to the
-         * entire room instead of sending it directly to a single
-         * WebSocket session.
-         *
-         * The frontend uses targetParticipantId to determine whether
-         * the received signaling message is intended for that client.
-         *
-         * Backend validation guarantees:
-         *
-         *     sender  -> belongs to room
-         *     target  -> belongs to room
-         *     sender  -> is not target
-         *
-         * The backend does NOT:
-         *
-         * - create WebRTC offers
-         * - create WebRTC answers
-         * - generate ICE candidates
-         * - perform WebRTC negotiation
-         *
-         * Those responsibilities belong to the browser's
-         * RTCPeerConnection.
-         */
         messagingTemplate.convertAndSend(
-                destination(roomId),
-                event
+                "/topic/meet/" + roomId,
+                WebSocketEvent.offer(
+                        roomId,
+                        participantId,
+                        targetParticipantId,
+                        offer
+                )
         );
     }
 
 
     /* =========================================================
-       DISCONNECT
+       WEBRTC ANSWER
        ========================================================= */
 
-    /*
-     * SessionDisconnectEvent is triggered by Spring when the
-     * WebSocket/STOMP session is disconnected.
-     *
-     * This is important because a user may disappear without
-     * successfully sending:
-     *
-     *     /app/meet/leave
-     *
-     * Examples:
-     *
-     * - Browser tab is closed
-     * - Browser crashes
-     * - Network connection is lost
-     * - WebSocket connection is terminated
-     *
-     * Therefore explicit LEAVE and disconnect cleanup are both
-     * required.
-     */
-    @EventListener
-    public void handleDisconnect(
-            SessionDisconnectEvent event
+    @MessageMapping("/webrtc/answer")
+    public void answer(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
     ) {
-
-        /*
-         * SessionDisconnectEvent contains the STOMP message.
-         *
-         * StompHeaderAccessor gives us access to the WebSocket
-         * session ID associated with that message.
-         */
-        StompHeaderAccessor accessor =
-                StompHeaderAccessor.wrap(
-                        event.getMessage()
-                );
-
 
         String sessionId =
-                accessor.getSessionId();
+                headerAccessor.getSessionId();
 
-        if (sessionId == null) {
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+        String targetParticipantId =
+                stringValue(
+                        payload,
+                        "targetParticipantId"
+                );
+
+        Object answer =
+                payload.get("answer");
+
+
+        if (
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+                        || targetParticipantId == null
+                        || answer == null
+        ) {
             return;
         }
 
 
-        /*
-         * RoomManager uses the session ID to find and remove the
-         * participant associated with the disconnected connection.
-         *
-         * This is why the backend maintains a relationship between
-         * WebSocket session and participant.
-         */
-        ParticipantSession removed =
-                roomManager.leaveBySession(sessionId);
-
-        if (removed == null) {
+        if (
+                !roomManager.isMember(
+                        sessionId,
+                        roomId,
+                        participantId
+                )
+        ) {
             return;
         }
 
 
-        /*
-         * Notify the remaining participants about the departure.
-         */
-        broadcastParticipantLeft(removed);
-    }
+        System.out.println(
+                "[MyMeet] WEBRTC ANSWER:"
+                        + " from=" + participantId
+                        + " to=" + targetParticipantId
+        );
 
-
-    /* =========================================================
-       PARTICIPANT LEFT
-       ========================================================= */
-
-    /*
-     * Centralizes the PARTICIPANT_LEFT broadcast so both:
-     *
-     *     explicit LEAVE
-     *
-     * and
-     *
-     *     WebSocket DISCONNECT
-     *
-     * produce the same frontend event.
-     */
-    private void broadcastParticipantLeft(
-            ParticipantSession participant
-    ) {
 
         messagingTemplate.convertAndSend(
-                destination(
-                        participant.getRoomId()
-                ),
-                WebSocketEvent.participantLeft(
-                        participant.getRoomId(),
-                        participant.getParticipantId()
+                "/topic/meet/" + roomId,
+                WebSocketEvent.answer(
+                        roomId,
+                        participantId,
+                        targetParticipantId,
+                        answer
                 )
         );
     }
 
 
     /* =========================================================
-       DESTINATION
+       WEBRTC ICE
        ========================================================= */
 
-    /*
-     * Builds the STOMP topic used by a meeting room.
-     *
-     * Frontend subscription:
-     *
-     *     /topic/meet/{roomId}
-     *
-     * Example:
-     *
-     *     /topic/meet/demo
-     *
-     * This follows the MyMeet STOMP architecture:
-     *
-     *     /app
-     *         |
-     *         +-- client -> server application messages
-     *
-     *     /topic
-     *         |
-     *         +-- server -> subscribed clients
-     *
-     * Therefore:
-     *
-     *     /app/meet/join
-     *
-     * is an application destination handled by this controller,
-     * while:
-     *
-     *     /topic/meet/{roomId}
-     *
-     * is the broker destination to which participants subscribe.
-     */
-    private String destination(
-            String roomId
+    @MessageMapping("/webrtc/ice")
+    public void ice(
+            @Payload Map<String, Object> payload,
+            SimpMessageHeaderAccessor headerAccessor
     ) {
 
-        return "/topic/meet/" + roomId;
+        String sessionId =
+                headerAccessor.getSessionId();
+
+        String roomId =
+                stringValue(payload, "roomId");
+
+        String participantId =
+                stringValue(payload, "participantId");
+
+        String targetParticipantId =
+                stringValue(
+                        payload,
+                        "targetParticipantId"
+                );
+
+        Object candidate =
+                payload.get("candidate");
+
+
+        if (
+                sessionId == null
+                        || roomId == null
+                        || participantId == null
+                        || targetParticipantId == null
+                        || candidate == null
+        ) {
+            return;
+        }
+
+
+        if (
+                !roomManager.isMember(
+                        sessionId,
+                        roomId,
+                        participantId
+                )
+        ) {
+            return;
+        }
+
+
+        System.out.println(
+                "[MyMeet] WEBRTC ICE:"
+                        + " from=" + participantId
+                        + " to=" + targetParticipantId
+        );
+
+
+        messagingTemplate.convertAndSend(
+                "/topic/meet/" + roomId,
+                WebSocketEvent.ice(
+                        roomId,
+                        participantId,
+                        targetParticipantId,
+                        candidate
+                )
+        );
+    }
+
+
+    /* =========================================================
+       STRING HELPER
+       ========================================================= */
+
+    private String stringValue(
+            Map<String, Object> payload,
+            String key
+    ) {
+
+        Object value =
+                payload.get(key);
+
+
+        if (value == null) {
+            return null;
+        }
+
+
+        String result =
+                value.toString().trim();
+
+
+        return result.isEmpty()
+                ? null
+                : result;
+    }
+
+
+    /* =========================================================
+       BOOLEAN HELPER
+       ========================================================= */
+
+    private boolean booleanValue(
+            Map<String, Object> payload,
+            String key,
+            boolean defaultValue
+    ) {
+
+        Object value =
+                payload.get(key);
+
+
+        if (value == null) {
+            return defaultValue;
+        }
+
+
+        if (value instanceof Boolean booleanValue) {
+            return booleanValue;
+        }
+
+
+        return Boolean.parseBoolean(
+                value.toString()
+        );
     }
 }

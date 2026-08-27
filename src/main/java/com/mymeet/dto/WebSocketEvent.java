@@ -24,7 +24,17 @@ public record WebSocketEvent(
 
         Object answer,
 
-        Object candidate
+        Object candidate,
+
+        Boolean muted,
+
+        Boolean cameraOff,
+
+        Boolean handRaised,
+
+        Boolean screenSharing,
+
+        String emoji
 
 ) {
 
@@ -46,6 +56,11 @@ public record WebSocketEvent(
                 null,
                 null,
                 participants,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null,
                 null
@@ -73,6 +88,11 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null
         );
     }
@@ -91,6 +111,11 @@ public record WebSocketEvent(
                 "PARTICIPANT_LEFT",
                 roomId,
                 participantId,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -122,6 +147,11 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null
         );
     }
@@ -148,7 +178,133 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null
+        );
+    }
+
+
+    /* =========================================================
+       MEDIA STATUS
+       ========================================================= */
+
+    public static WebSocketEvent mediaStatus(
+            String roomId,
+            String participantId,
+            boolean muted,
+            boolean cameraOff
+    ) {
+
+        return new WebSocketEvent(
+                "MEDIA_STATUS_UPDATE",
+                roomId,
+                participantId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                muted,
+                cameraOff,
+                null,
+                null,
+                null
+        );
+    }
+
+
+    /* =========================================================
+       HAND RAISE
+       ========================================================= */
+
+    public static WebSocketEvent handRaise(
+            String roomId,
+            String participantId,
+            boolean handRaised
+    ) {
+
+        return new WebSocketEvent(
+                "HAND_RAISE_TOGGLE",
+                roomId,
+                participantId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                handRaised,
+                null,
+                null
+        );
+    }
+
+
+    /* =========================================================
+       SCREEN SHARE
+       ========================================================= */
+
+    public static WebSocketEvent screenShare(
+            String roomId,
+            String participantId,
+            boolean screenSharing
+    ) {
+
+        return new WebSocketEvent(
+                "SCREEN_SHARE_STATUS",
+                roomId,
+                participantId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                screenSharing,
+                null
+        );
+    }
+
+
+    /* =========================================================
+       REACTION
+       ========================================================= */
+
+    public static WebSocketEvent reaction(
+            String roomId,
+            String participantId,
+            String emoji
+    ) {
+
+        return new WebSocketEvent(
+                "REACTION",
+                roomId,
+                participantId,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                emoji
         );
     }
 
@@ -173,6 +329,11 @@ public record WebSocketEvent(
                 null,
                 null,
                 offer,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null
         );
@@ -200,6 +361,11 @@ public record WebSocketEvent(
                 null,
                 null,
                 answer,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null
         );
     }
@@ -226,7 +392,12 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
-                candidate
+                candidate,
+                null,
+                null,
+                null,
+                null,
+                null
         );
     }
 }
