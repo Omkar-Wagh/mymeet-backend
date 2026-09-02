@@ -134,8 +134,11 @@ public class RoomManager {
 
 
         /*
-         * Prevent the same participantId from being represented
-         * by multiple WebSocket connections.
+         * If this participant already has a WebSocket session,
+         * treat the new connection as a reconnect/replacement.
+         *
+         * The participant itself remains in the room. Only the
+         * old WebSocket session mapping is replaced.
          */
         String existingSessionId =
                 participantSessions.get(participantId);
@@ -146,14 +149,75 @@ public class RoomManager {
                         !existingSessionId.equals(sessionId)
         ) {
 
-            return new JoinResult(
-                    false,
-                    true,
-                    false,
-                    snapshot(roomId)
-            );
-        }
+            ParticipantSession oldSession =
+                    sessions.get(existingSessionId);
 
+            /*
+             * Do not allow a participantId currently associated
+             * with another room to replace that connection.
+             */
+            if (
+                    oldSession != null
+                            &&
+                            !oldSession.getRoomId().equals(roomId)
+            ) {
+                return new JoinResult(
+                        false,
+                        true,
+                        false,
+                        snapshot(roomId)
+                );
+            }
+
+            /*
+             * If the reverse mapping is stale, remove it and
+             * continue as a normal new participant join.
+             */
+            if (oldSession == null) {
+
+                participantSessions.remove(
+                        participantId,
+                        existingSessionId
+                );
+
+            } else {
+
+                /*
+                 * Remove only the old WebSocket session.
+                 *
+                 * IMPORTANT:
+                 * Do NOT remove the Participant from rooms.
+                 * The existing Participant object contains the
+                 * authoritative realtime state and must survive
+                 * the reconnect.
+                 */
+                sessions.remove(existingSessionId);
+
+                ParticipantSession replacement =
+                        new ParticipantSession(
+                                sessionId,
+                                roomId,
+                                participantId
+                        );
+
+                sessions.put(
+                        sessionId,
+                        replacement
+                );
+
+                participantSessions.put(
+                        participantId,
+                        sessionId
+                );
+
+                return new JoinResult(
+                        false,
+                        false,
+                        false,
+                        snapshot(roomId)
+                );
+            }
+        }
 
         String safeName =
                 name == null || name.isBlank()
@@ -495,7 +559,6 @@ public class RoomManager {
 
         return snapshot(roomId);
     }
-
 
     /* =========================================================
        JOIN RESULT
