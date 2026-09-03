@@ -3,6 +3,7 @@ package com.mymeet.controller;
 import com.mymeet.dto.JoinRequest;
 import com.mymeet.dto.LeaveRequest;
 import com.mymeet.dto.WebSocketEvent;
+import com.mymeet.model.Participant;
 import com.mymeet.room.RoomManager;
 
 import org.springframework.messaging.handler.annotation.MessageMapping;
@@ -155,23 +156,66 @@ public class MeetController {
 
             /*
              * =====================================================
+             * INITIAL PARTICIPANT STATE
+             * =====================================================
+             *
+             * A brand-new participant is created by RoomManager with
+             * default state. Before sending ROOM_STATE, replace those
+             * defaults with the actual media state reported by the
+             * joining client.
+             *
+             * IMPORTANT:
+             *
+             * This is intentionally done only for newlyJoined. A
+             * replacement/reconnect must keep the Participant object
+             * already stored in RoomManager, including its current
+             * mic/camera/hand/screen state.
+             */
+
+            var participants =
+                    result.participants();
+
+            if (result.newlyJoined()) {
+
+                Participant updated =
+                        roomManager.updateParticipantState(
+                                request.getRoomId(),
+                                request.getParticipantId(),
+                                request.isMuted(),
+                                request.isCameraOff(),
+                                request.isScreenSharing(),
+                                request.isHandRaised()
+                        );
+
+                if (updated != null) {
+                    participants =
+                            roomManager.snapshot(
+                                    request.getRoomId()
+                            );
+                }
+            }
+
+
+            /*
+             * =====================================================
              * ROOM STATE
              * =====================================================
              *
              * This is sent for both:
              *
              * 1. newly joined participant
-             * 2. repeated JOIN from the same session
+             * 2. repeated JOIN/replacement from the same logical
+             *    participant identity
              *
-             * The frontend can use ROOM_STATE to initialize
-             * the meeting participant list.
+             * ROOM_STATE is the authoritative participant snapshot
+             * consumed by the frontend.
              */
 
             messagingTemplate.convertAndSend(
                     "/topic/meet/" + request.getRoomId(),
                     WebSocketEvent.roomState(
                             request.getRoomId(),
-                            result.participants()
+                            participants
                     )
             );
 
@@ -485,6 +529,31 @@ public class MeetController {
                 );
 
 
+        Participant participant =
+                roomManager.getParticipant(
+                        sessionId
+                );
+
+        if (participant == null) {
+            return;
+        }
+
+
+        Participant updated =
+                roomManager.updateParticipantState(
+                        roomId,
+                        participantId,
+                        muted,
+                        cameraOff,
+                        participant.isScreenSharing(),
+                        participant.isHandRaised()
+                );
+
+        if (updated == null) {
+            return;
+        }
+
+
         System.out.println(
                 "[MyMeet] MEDIA STATUS:"
                         + " room=" + roomId
@@ -554,6 +623,31 @@ public class MeetController {
                 );
 
 
+        Participant participant =
+                roomManager.getParticipant(
+                        sessionId
+                );
+
+        if (participant == null) {
+            return;
+        }
+
+
+        Participant updated =
+                roomManager.updateParticipantState(
+                        roomId,
+                        participantId,
+                        participant.isMuted(),
+                        participant.isCameraOff(),
+                        participant.isScreenSharing(),
+                        handRaised
+                );
+
+        if (updated == null) {
+            return;
+        }
+
+
         System.out.println(
                 "[MyMeet] HAND RAISE:"
                         + " room=" + roomId
@@ -619,6 +713,31 @@ public class MeetController {
                         "screenSharing",
                         false
                 );
+
+
+        Participant participant =
+                roomManager.getParticipant(
+                        sessionId
+                );
+
+        if (participant == null) {
+            return;
+        }
+
+
+        Participant updated =
+                roomManager.updateParticipantState(
+                        roomId,
+                        participantId,
+                        participant.isMuted(),
+                        participant.isCameraOff(),
+                        screenSharing,
+                        participant.isHandRaised()
+                );
+
+        if (updated == null) {
+            return;
+        }
 
 
         System.out.println(
