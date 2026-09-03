@@ -9,7 +9,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
+
 
 /*
  * RoomManager is the authoritative in-memory state manager
@@ -42,48 +43,30 @@ public class RoomManager {
 
 
     /*
-     * =========================================================
-     * ROOMS
-     * =========================================================
-     *
      * roomId
      *     |
      *     +-- participantId -> Participant
-     *
-     * HashMap is used together with synchronized methods so
-     * access to the complete in-memory state is thread-safe.
      */
     private final Map<String, Map<String, Participant>> rooms =
-            new HashMap<>();
+            new ConcurrentHashMap<>();
 
 
     /*
-     * =========================================================
-     * SESSIONS
-     * =========================================================
-     *
      * sessionId
      *     |
      *     +-- ParticipantSession
      */
     private final Map<String, ParticipantSession> sessions =
-            new HashMap<>();
+            new ConcurrentHashMap<>();
 
 
     /*
-     * =========================================================
-     * PARTICIPANT SESSIONS
-     * =========================================================
-     *
      * participantId
      *     |
      *     +-- sessionId
-     *
-     * This allows a participant to reconnect using a new
-     * WebSocket session without creating a second Participant.
      */
     private final Map<String, String> participantSessions =
-            new HashMap<>();
+            new ConcurrentHashMap<>();
 
 
     /* =========================================================
@@ -97,9 +80,6 @@ public class RoomManager {
             String name
     ) {
 
-        /*
-         * Basic validation.
-         */
         if (
                 sessionId == null ||
                         sessionId.isBlank() ||
@@ -113,16 +93,13 @@ public class RoomManager {
                     false,
                     false,
                     true,
+                    false,
                     Collections.emptyList()
             );
         }
 
 
         /*
-         * =====================================================
-         * EXISTING STOMP SESSION
-         * =====================================================
-         *
          * Prevent the same WebSocket session from representing
          * multiple participants.
          */
@@ -131,15 +108,6 @@ public class RoomManager {
 
         if (existingSession != null) {
 
-            /*
-             * Same session + same room + same participant.
-             *
-             * This is a repeated JOIN.
-             *
-             * Do NOT create a new Participant.
-             *
-             * Do NOT reset participant state.
-             */
             if (
                     existingSession.getRoomId().equals(roomId)
                             &&
@@ -152,44 +120,28 @@ public class RoomManager {
                         false,
                         false,
                         false,
+                        false,
                         snapshot(roomId)
                 );
             }
 
 
-            /*
-             * Same WebSocket session attempting to represent
-             * another participant or another room.
-             */
             return new JoinResult(
                     false,
                     false,
                     true,
+                    false,
                     snapshot(roomId)
             );
         }
 
 
         /*
-         * =====================================================
-         * EXISTING PARTICIPANT SESSION
-         * =====================================================
-         *
          * If this participant already has a WebSocket session,
          * treat the new connection as a reconnect/replacement.
          *
-         * IMPORTANT:
-         *
-         * The Participant object is NOT removed from the room.
-         *
-         * Therefore the following state survives reconnect:
-         *
-         *     muted
-         *     cameraOff
-         *     screenSharing
-         *     handRaised
-         *
-         * The old WebSocket session mapping is replaced only.
+         * The participant itself remains in the room. Only the
+         * old WebSocket session mapping is replaced.
          */
         String existingSessionId =
                 participantSessions.get(participantId);
@@ -203,40 +155,27 @@ public class RoomManager {
             ParticipantSession oldSession =
                     sessions.get(existingSessionId);
 
-
             /*
-             * =================================================
-             * PARTICIPANT BELONGS TO ANOTHER ROOM
-             * =================================================
-             *
-             * Do not allow the same participantId to replace
-             * an active participant in another room.
+             * Do not allow a participantId currently associated
+             * with another room to replace that connection.
              */
             if (
                     oldSession != null
                             &&
                             !oldSession.getRoomId().equals(roomId)
             ) {
-
                 return new JoinResult(
                         false,
                         true,
+                        false,
                         false,
                         snapshot(roomId)
                 );
             }
 
-
             /*
-             * =================================================
-             * STALE REVERSE MAPPING
-             * =================================================
-             *
-             * participantSessions says that a session exists,
-             * but the actual session is gone.
-             *
-             * Remove only the stale reverse mapping and allow
-             * normal participant creation below.
+             * If the reverse mapping is stale, remove it and
+             * continue as a normal new participant join.
              */
             if (oldSession == null) {
 
@@ -248,21 +187,15 @@ public class RoomManager {
             } else {
 
                 /*
-                 * =================================================
-                 * SESSION REPLACEMENT / RECONNECT
-                 * =================================================
-                 *
-                 * Remove ONLY the old WebSocket session.
+                 * Remove only the old WebSocket session.
                  *
                  * IMPORTANT:
-                 *
-                 * DO NOT remove the Participant from rooms.
-                 *
+                 * Do NOT remove the Participant from rooms.
                  * The existing Participant object contains the
-                 * authoritative realtime participant state.
+                 * authoritative realtime state and must survive
+                 * the reconnect.
                  */
                 sessions.remove(existingSessionId);
-
 
                 ParticipantSession replacement =
                         new ParticipantSession(
@@ -271,40 +204,25 @@ public class RoomManager {
                                 participantId
                         );
 
-
                 sessions.put(
                         sessionId,
                         replacement
                 );
-
 
                 participantSessions.put(
                         participantId,
                         sessionId
                 );
 
-
-                /*
-                 * Return the existing room snapshot.
-                 *
-                 * This snapshot contains the participant's
-                 * current authoritative state.
-                 */
                 return new JoinResult(
                         false,
                         false,
                         false,
+                        true,
                         snapshot(roomId)
                 );
             }
         }
-
-
-        /*
-         * =====================================================
-         * NEW PARTICIPANT
-         * =====================================================
-         */
 
         String safeName =
                 name == null || name.isBlank()
@@ -313,14 +231,12 @@ public class RoomManager {
 
 
         /*
-         * A genuinely new participant starts with the default
-         * Participant state defined by the Participant model.
+         * New participants always start with the default state:
          *
-         * This default is used ONLY when creating a new
-         * participant.
-         *
-         * Existing participants are NEVER recreated during
-         * state updates or reconnects.
+         * muted         = false
+         * cameraOff     = false
+         * screenSharing = false
+         * handRaised    = false
          */
         Participant participant =
                 new Participant(
@@ -337,12 +253,6 @@ public class RoomManager {
                 );
 
 
-        /*
-         * Create room only when it does not already exist.
-         *
-         * LinkedHashMap preserves participant insertion order
-         * in ROOM_STATE snapshots.
-         */
         Map<String, Participant> room =
                 rooms.computeIfAbsent(
                         roomId,
@@ -372,33 +282,29 @@ public class RoomManager {
                 true,
                 false,
                 false,
+                false,
                 snapshot(roomId)
         );
     }
 
 
     /* =========================================================
-       UPDATE COMPLETE PARTICIPANT STATE
+       UPDATE PARTICIPANT STATE
        ========================================================= */
 
     /*
-     * Updates all realtime state fields together.
+     * Updates the authoritative realtime state of a participant.
      *
-     * This method is intentionally kept available for cases
-     * where the COMPLETE participant state is known.
+     * Returns the updated Participant.
      *
-     * IMPORTANT:
+     * Returns null if:
      *
-     * Do NOT use this method for partial events such as:
+     * - room does not exist
+     * - participant does not exist
      *
-     *     media-status
-     *     hand-raise
-     *     screen-share
      *
-     * because those events do not necessarily contain every
-     * participant state field.
-     *
-     * The partial update methods below must be used instead.
+     * This method is synchronized because several participant
+     * fields are changed together as one logical state update.
      */
     public synchronized Participant updateParticipantState(
             String roomId,
@@ -434,162 +340,6 @@ public class RoomManager {
         participant.setHandRaised(handRaised);
 
 
-        return participant;
-    }
-
-
-    /* =========================================================
-       UPDATE MEDIA STATE
-       ========================================================= */
-
-    /*
-     * Updates ONLY:
-     *
-     *     muted
-     *     cameraOff
-     *
-     * The following fields are intentionally preserved:
-     *
-     *     screenSharing
-     *     handRaised
-     *
-     * This prevents a media-status event from accidentally
-     * resetting unrelated participant state.
-     */
-    public synchronized Participant updateMediaState(
-            String roomId,
-            String participantId,
-            boolean muted,
-            boolean cameraOff
-    ) {
-
-        Map<String, Participant> room =
-                rooms.get(roomId);
-
-        if (room == null) {
-            return null;
-        }
-
-
-        Participant participant =
-                room.get(participantId);
-
-        if (participant == null) {
-            return null;
-        }
-
-
-        /*
-         * Update ONLY media state.
-         */
-        participant.setMuted(muted);
-
-        participant.setCameraOff(cameraOff);
-
-
-        /*
-         * screenSharing and handRaised remain untouched.
-         */
-        return participant;
-    }
-
-
-    /* =========================================================
-       UPDATE HAND RAISED
-       ========================================================= */
-
-    /*
-     * Updates ONLY:
-     *
-     *     handRaised
-     *
-     * The following fields are intentionally preserved:
-     *
-     *     muted
-     *     cameraOff
-     *     screenSharing
-     */
-    public synchronized Participant updateHandRaised(
-            String roomId,
-            String participantId,
-            boolean handRaised
-    ) {
-
-        Map<String, Participant> room =
-                rooms.get(roomId);
-
-        if (room == null) {
-            return null;
-        }
-
-
-        Participant participant =
-                room.get(participantId);
-
-        if (participant == null) {
-            return null;
-        }
-
-
-        /*
-         * Update ONLY hand-raise state.
-         */
-        participant.setHandRaised(handRaised);
-
-
-        /*
-         * All other participant state remains unchanged.
-         */
-        return participant;
-    }
-
-
-    /* =========================================================
-       UPDATE SCREEN SHARING
-       ========================================================= */
-
-    /*
-     * Updates ONLY:
-     *
-     *     screenSharing
-     *
-     * The following fields are intentionally preserved:
-     *
-     *     muted
-     *     cameraOff
-     *     handRaised
-     */
-    public synchronized Participant updateScreenSharing(
-            String roomId,
-            String participantId,
-            boolean screenSharing
-    ) {
-
-        Map<String, Participant> room =
-                rooms.get(roomId);
-
-        if (room == null) {
-            return null;
-        }
-
-
-        Participant participant =
-                room.get(participantId);
-
-        if (participant == null) {
-            return null;
-        }
-
-
-        /*
-         * Update ONLY screen-sharing state.
-         */
-        participant.setScreenSharing(screenSharing);
-
-
-        /*
-         * All other participant state remains unchanged.
-         */
         return participant;
     }
 
@@ -656,13 +406,6 @@ public class RoomManager {
         }
 
 
-        /*
-         * Remove reverse participant -> session mapping only
-         * when it still points to this session.
-         *
-         * This prevents an old session from accidentally removing
-         * the mapping of a newer replacement session.
-         */
         participantSessions.remove(
                 participantId,
                 sessionId
@@ -677,9 +420,6 @@ public class RoomManager {
             room.remove(participantId);
 
 
-            /*
-             * Remove empty rooms.
-             */
             if (room.isEmpty()) {
 
                 rooms.remove(
@@ -711,11 +451,10 @@ public class RoomManager {
 
 
         /*
-         * Return a new list so callers cannot directly modify
-         * the internal room collection.
+         * Return a copy.
          *
-         * The Participant objects themselves are the authoritative
-         * objects stored by RoomManager.
+         * This prevents callers from modifying the internal
+         * room collection directly.
          */
         return new ArrayList<>(
                 room.values()
@@ -727,7 +466,7 @@ public class RoomManager {
        GET SESSION
        ========================================================= */
 
-    public synchronized ParticipantSession getSession(
+    public ParticipantSession getSession(
             String sessionId
     ) {
 
@@ -739,7 +478,7 @@ public class RoomManager {
        GET PARTICIPANT
        ========================================================= */
 
-    public synchronized Participant getParticipant(
+    public Participant getParticipant(
             String sessionId
     ) {
 
@@ -771,7 +510,7 @@ public class RoomManager {
        MEMBERSHIP CHECK
        ========================================================= */
 
-    public synchronized boolean isMember(
+    public boolean isMember(
             String sessionId,
             String roomId,
             String participantId
@@ -797,7 +536,7 @@ public class RoomManager {
        PARTICIPANT EXISTS
        ========================================================= */
 
-    public synchronized boolean isParticipantInRoom(
+    public boolean isParticipantInRoom(
             String roomId,
             String participantId
     ) {
@@ -836,6 +575,7 @@ public class RoomManager {
             boolean newlyJoined,
             boolean duplicateParticipant,
             boolean invalidSession,
+            boolean replacedSession,
             List<Participant> participants
     ) {
     }

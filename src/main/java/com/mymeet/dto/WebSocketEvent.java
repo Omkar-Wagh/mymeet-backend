@@ -34,7 +34,9 @@ public record WebSocketEvent(
 
         Boolean screenSharing,
 
-        String emoji
+        String emoji,
+
+        String connectionId
 
 ) {
 
@@ -56,6 +58,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 participants,
+                null,
                 null,
                 null,
                 null,
@@ -93,6 +96,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -111,6 +115,7 @@ public record WebSocketEvent(
                 "PARTICIPANT_LEFT",
                 roomId,
                 participantId,
+                null,
                 null,
                 null,
                 null,
@@ -152,6 +157,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -175,6 +181,7 @@ public record WebSocketEvent(
                 null,
                 name,
                 message,
+                null,
                 null,
                 null,
                 null,
@@ -214,6 +221,7 @@ public record WebSocketEvent(
                 cameraOff,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -243,6 +251,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 handRaised,
+                null,
                 null,
                 null
         );
@@ -274,6 +283,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 screenSharing,
+                null,
                 null
         );
     }
@@ -304,10 +314,42 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
-                emoji
+                emoji,
+                null
         );
     }
 
+
+    /* =========================================================
+       PARTICIPANT SESSION REPLACED
+       ========================================================= */
+
+    public static WebSocketEvent participantSessionReplaced(
+            String roomId,
+            String participantId,
+            String connectionId,
+            List<Participant> participants
+    ) {
+
+        return new WebSocketEvent(
+                "PARTICIPANT_SESSION_REPLACED",
+                roomId,
+                participantId,
+                null,
+                null,
+                null,
+                participants,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                connectionId
+        );
+    }
 
     /* =========================================================
        WEBRTC OFFER
@@ -329,6 +371,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 offer,
+                null,
                 null,
                 null,
                 null,
@@ -366,6 +409,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 null,
+                null,
                 null
         );
     }
@@ -393,6 +437,7 @@ public record WebSocketEvent(
                 null,
                 null,
                 candidate,
+                null,
                 null,
                 null,
                 null,

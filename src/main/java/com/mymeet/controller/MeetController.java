@@ -3,8 +3,6 @@ package com.mymeet.controller;
 import com.mymeet.dto.JoinRequest;
 import com.mymeet.dto.LeaveRequest;
 import com.mymeet.dto.WebSocketEvent;
-import com.mymeet.model.Participant;
-import com.mymeet.model.ParticipantSession;
 import com.mymeet.room.RoomManager;
 
 import org.springframework.messaging.handler.annotation.MessageMapping;
@@ -59,7 +57,7 @@ public class MeetController {
 
         /*
          * A STOMP session is mandatory because RoomManager
-         * uses the WebSocket session as the authoritative
+         * now uses the WebSocket session as the authoritative
          * connection identity.
          */
         if (sessionId == null || sessionId.isBlank()) {
@@ -79,6 +77,15 @@ public class MeetController {
              * =====================================================
              * JOIN ROOM
              * =====================================================
+             *
+             * Current RoomManager signature:
+             *
+             * join(
+             *     sessionId,
+             *     roomId,
+             *     participantId,
+             *     name
+             * )
              */
 
             RoomManager.JoinResult result =
@@ -151,18 +158,15 @@ public class MeetController {
              * ROOM STATE
              * =====================================================
              *
-             * The RoomManager snapshot is authoritative.
+             * This is sent for both:
              *
-             * This means the ROOM_STATE contains the current
-             * backend participant state:
+             * 1. newly joined participant
+             * 2. repeated JOIN from the same session
              *
-             *     muted
-             *     cameraOff
-             *     screenSharing
-             *     handRaised
-             *
-             * No state is reconstructed with defaults here.
+             * The frontend can use ROOM_STATE to initialize
+             * the meeting participant list.
              */
+
             messagingTemplate.convertAndSend(
                     "/topic/meet/" + request.getRoomId(),
                     WebSocketEvent.roomState(
@@ -174,15 +178,42 @@ public class MeetController {
 
             /*
              * =====================================================
+             * PARTICIPANT SESSION REPLACED
+             * =====================================================
+             *
+             * The logical participant remains in the room, but the
+             * old WebRTC session is no longer valid. Notify every
+             * client so they can discard the old peer connection.
+             * connectionId lets the newest tab distinguish itself
+             * from the tab that was replaced.
+             */
+
+            if (result.replacedSession()) {
+
+                messagingTemplate.convertAndSend(
+                        "/topic/meet/" + request.getRoomId(),
+                        WebSocketEvent.participantSessionReplaced(
+                                request.getRoomId(),
+                                request.getParticipantId(),
+                                request.getConnectionId(),
+                                result.participants()
+                        )
+                );
+            }
+
+
+            /*
+             * =====================================================
              * PARTICIPANT JOINED
              * =====================================================
              *
-             * Only broadcast this when a participant was actually
-             * added to the room.
+             * Only broadcast this event when a participant
+             * was actually added.
              *
-             * A reconnect/repeated JOIN does not generate a new
-             * PARTICIPANT_JOINED event.
+             * If the same session sends JOIN again, RoomManager
+             * returns newlyJoined=false.
              */
+
             if (result.newlyJoined()) {
 
                 messagingTemplate.convertAndSend(
@@ -268,9 +299,17 @@ public class MeetController {
              * =====================================================
              * LEAVE ROOM
              * =====================================================
+             *
+             * Current RoomManager signature:
+             *
+             * leave(
+             *     sessionId,
+             *     roomId,
+             *     participantId
+             * )
              */
 
-            ParticipantSession removed =
+            var removed =
                     roomManager.leave(
                             sessionId,
                             request.getRoomId(),
@@ -279,9 +318,10 @@ public class MeetController {
 
 
             /*
-             * If null is returned, the participant/session
-             * relationship was invalid or already removed.
+             * If null is returned, the participant was not
+             * successfully removed.
              */
+
             if (removed == null) {
 
                 System.err.println(
@@ -399,9 +439,6 @@ public class MeetController {
                 stringValue(payload, "participantId");
 
 
-        /*
-         * Basic validation.
-         */
         if (
                 sessionId == null
                         || roomId == null
@@ -412,13 +449,10 @@ public class MeetController {
 
 
         /*
-         * =====================================================
-         * MEMBERSHIP VALIDATION
-         * =====================================================
-         *
          * Make sure the WebSocket session is actually
-         * representing this participant in this room.
+         * representing this participant.
          */
+
         if (
                 !roomManager.isMember(
                         sessionId,
@@ -430,9 +464,6 @@ public class MeetController {
             System.err.println(
                     "[MyMeet] MEDIA STATUS REJECTED:"
                             + " invalid membership"
-                            + ", session=" + sessionId
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
             );
 
             return;
@@ -463,60 +494,13 @@ public class MeetController {
         );
 
 
-        /*
-         * =====================================================
-         * AUTHORITATIVE STATE UPDATE
-         * =====================================================
-         *
-         * IMPORTANT:
-         *
-         * updateMediaState() changes ONLY:
-         *
-         *     muted
-         *     cameraOff
-         *
-         * It does NOT reset:
-         *
-         *     screenSharing
-         *     handRaised
-         */
-        Participant updatedParticipant =
-                roomManager.updateMediaState(
-                        roomId,
-                        participantId,
-                        muted,
-                        cameraOff
-                );
-
-
-        /*
-         * Participant disappeared between membership validation
-         * and state update.
-         */
-        if (updatedParticipant == null) {
-
-            System.err.println(
-                    "[MyMeet] MEDIA STATUS REJECTED:"
-                            + " participant state not found"
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
-            );
-
-            return;
-        }
-
-
-        /*
-         * Broadcast the state that is actually stored in the
-         * backend authority.
-         */
         messagingTemplate.convertAndSend(
                 "/topic/meet/" + roomId,
                 WebSocketEvent.mediaStatus(
                         roomId,
                         participantId,
-                        updatedParticipant.isMuted(),
-                        updatedParticipant.isCameraOff()
+                        muted,
+                        cameraOff
                 )
         );
     }
@@ -542,9 +526,6 @@ public class MeetController {
                 stringValue(payload, "participantId");
 
 
-        /*
-         * Basic validation.
-         */
         if (
                 sessionId == null
                         || roomId == null
@@ -554,9 +535,6 @@ public class MeetController {
         }
 
 
-        /*
-         * Validate that the session owns this participant.
-         */
         if (
                 !roomManager.isMember(
                         sessionId,
@@ -564,15 +542,6 @@ public class MeetController {
                         participantId
                 )
         ) {
-
-            System.err.println(
-                    "[MyMeet] HAND RAISE REJECTED:"
-                            + " invalid membership"
-                            + ", session=" + sessionId
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
-            );
-
             return;
         }
 
@@ -593,45 +562,12 @@ public class MeetController {
         );
 
 
-        /*
-         * =====================================================
-         * AUTHORITATIVE STATE UPDATE
-         * =====================================================
-         *
-         * ONLY handRaised is changed.
-         *
-         * muted, cameraOff and screenSharing are preserved.
-         */
-        Participant updatedParticipant =
-                roomManager.updateHandRaised(
-                        roomId,
-                        participantId,
-                        handRaised
-                );
-
-
-        if (updatedParticipant == null) {
-
-            System.err.println(
-                    "[MyMeet] HAND RAISE REJECTED:"
-                            + " participant state not found"
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
-            );
-
-            return;
-        }
-
-
-        /*
-         * Broadcast authoritative backend state.
-         */
         messagingTemplate.convertAndSend(
                 "/topic/meet/" + roomId,
                 WebSocketEvent.handRaise(
                         roomId,
                         participantId,
-                        updatedParticipant.isHandRaised()
+                        handRaised
                 )
         );
     }
@@ -657,9 +593,6 @@ public class MeetController {
                 stringValue(payload, "participantId");
 
 
-        /*
-         * Basic validation.
-         */
         if (
                 sessionId == null
                         || roomId == null
@@ -669,9 +602,6 @@ public class MeetController {
         }
 
 
-        /*
-         * Validate participant membership.
-         */
         if (
                 !roomManager.isMember(
                         sessionId,
@@ -679,15 +609,6 @@ public class MeetController {
                         participantId
                 )
         ) {
-
-            System.err.println(
-                    "[MyMeet] SCREEN SHARE REJECTED:"
-                            + " invalid membership"
-                            + ", session=" + sessionId
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
-            );
-
             return;
         }
 
@@ -708,45 +629,12 @@ public class MeetController {
         );
 
 
-        /*
-         * =====================================================
-         * AUTHORITATIVE STATE UPDATE
-         * =====================================================
-         *
-         * ONLY screenSharing is changed.
-         *
-         * muted, cameraOff and handRaised are preserved.
-         */
-        Participant updatedParticipant =
-                roomManager.updateScreenSharing(
-                        roomId,
-                        participantId,
-                        screenSharing
-                );
-
-
-        if (updatedParticipant == null) {
-
-            System.err.println(
-                    "[MyMeet] SCREEN SHARE REJECTED:"
-                            + " participant state not found"
-                            + ", room=" + roomId
-                            + ", participant=" + participantId
-            );
-
-            return;
-        }
-
-
-        /*
-         * Broadcast authoritative backend state.
-         */
         messagingTemplate.convertAndSend(
                 "/topic/meet/" + roomId,
                 WebSocketEvent.screenShare(
                         roomId,
                         participantId,
-                        updatedParticipant.isScreenSharing()
+                        screenSharing
                 )
         );
     }
@@ -792,7 +680,6 @@ public class MeetController {
                         participantId
                 )
         ) {
-
             return;
         }
 
@@ -805,11 +692,6 @@ public class MeetController {
         );
 
 
-        /*
-         * Reaction remains transient.
-         *
-         * It is not stored as authoritative Participant state.
-         */
         messagingTemplate.convertAndSend(
                 "/topic/meet/" + roomId,
                 WebSocketEvent.reaction(
